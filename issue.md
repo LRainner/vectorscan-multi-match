@@ -10,94 +10,50 @@ Compiling multiple expressions into a single database in HS_MODE_BLOCK and scann
 - **Operating System**: Linux Ubuntu 24.04 and Macos 26.1
 - **Compiler**: g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0 and Apple clang version 17.0.0 (clang-1700.4.4.1)
 
-### Minimal Reproducible Example
+### Reproduction (key code only)
 
+1) Patterns and test data
 ```cpp
-#include <iostream>
-#include <vector>
-#include <string>
-#include <iomanip>
-#include <hs/hs.h>
-
-struct Match {
-    unsigned int id;
-    unsigned long long from;
-    unsigned long long to;
-    unsigned int flags;
+// Problem set
+std::vector<std::string> patterns = {
+    "<%[\\s\\S]+%>",
+    "<[^<>]+:(include|forward|invoke|doBody|getProperty|setProperty|useBean|plugin|element|attribute|body|fallback|params|param|output|root)",
+    "[\\$#]{[\\s\\S]+\\([\\s\\S]*\\)[\\s\\S]*}"
 };
 
-static int onMatch(unsigned int id, unsigned long long from,
-                   unsigned long long to, unsigned int flags, void *ctx) {
-    auto *matches = static_cast<std::vector<Match>*>(ctx);
-    matches->push_back(Match{id, from, to, flags});
-    return 0;
-}
+// Minimal working set (for comparison)
+// std::vector<std::string> patterns = {
+//     "<%[\\s\\S]+%>",
+//     "<[^<>]+:scriptlet>"
+// };
 
-int main() {
-    // These patterns compile successfully but fail to match
-    std::vector<std::string> patterns = {
-        "<%[\\s\\S]+%>",
-        "<[^<>]+:(include|forward|invoke|doBody|getProperty|setProperty|useBean|plugin|element|attribute|body|fallback|params|param|output|root)",
-        "[\\$#]{[\\s\\S]+\\([\\s\\S]*\\)[\\s\\S]*}",
-    };
+std::string data = "<%out.print();int a%>";
+```
 
-    std::vector<const char*> exprs;
-    exprs.reserve(patterns.size());
-    for (const auto &s : patterns) {
-        exprs.push_back(s.c_str());
-    }
+2) Compile and scan (core API calls)
+```cpp
+// Prepare inputs
+std::vector<const char*> exprs; for (auto &s : patterns) exprs.push_back(s.c_str());
+std::vector<unsigned int> flags(patterns.size(), 0);
+std::vector<unsigned int> ids(patterns.size()); for (unsigned i=0;i<ids.size();++i) ids[i]=i;
 
-    std::vector<unsigned int> flags(patterns.size(), 0);
-    std::vector<unsigned int> ids(patterns.size());
-    for (unsigned int i = 0; i < ids.size(); ++i) ids[i] = i;
+hs_database_t *db = nullptr; hs_compile_error_t *err = nullptr;
+hs_error_t rc = hs_compile_multi(exprs.data(), flags.data(), ids.data(),
+                                 patterns.size(), HS_MODE_BLOCK, nullptr, &db, &err);
 
-    hs_database_t *db = nullptr;
-    hs_compile_error_t *compileErr = nullptr;
+hs_scratch_t *scratch = nullptr;
+rc = hs_alloc_scratch(db, &scratch);
 
-    hs_error_t rc = hs_compile_multi(
-        exprs.data(),
-        flags.data(),
-        ids.data(),
-        patterns.size(),
-        HS_MODE_BLOCK,
-        nullptr,
-        &db,
-        &compileErr
-    );
+std::vector<Match> matches;
+rc = hs_scan(db, data.c_str(), data.size(), 0, scratch, onMatch, &matches);
+```
 
-    if (rc != HS_SUCCESS) {
-        std::cerr << "Compile failed: " << (compileErr ? compileErr->message : "unknown") << "\n";
-        if (compileErr) hs_free_compile_error(compileErr);
-        return 1;
-    }
-    hs_free_compile_error(compileErr);
-
-    hs_scratch_t *scratch = nullptr;
-    rc = hs_alloc_scratch(db, &scratch);
-    if (rc != HS_SUCCESS) {
-        std::cerr << "Failed to allocate scratch: " << rc << "\n";
-        hs_free_database(db);
-        return 1;
-    }
-
-    // Test data that should match the first pattern "<%[\\s\\S]+%>"
-    std::string data = "<%out.print();int a%>";
-
-    std::vector<Match> matches;
-    rc = hs_scan(db, data.c_str(), data.size(), 0, scratch, onMatch, &matches);
-    
-    if (rc != HS_SUCCESS) {
-        std::cerr << "Scan failed with error: " << rc << "\n";
-    } else {
-        std::cout << "Data length: " << data.size() << ", Matches found: " << matches.size() << "\n";
-        for (const auto &m : matches) {
-            std::cout << "ID: " << m.id << " [" << m.from << "," << m.to << ") - " 
-                      << patterns[m.id] << "\n";
-        }
-    }
-
-    hs_free_scratch(scratch);
-    hs_free_database(db);
+3) Match callback skeleton
+```cpp
+static int onMatch(unsigned int id, unsigned long long from, unsigned long long to,
+                   unsigned int flags, void *ctx) {
+    auto *out = static_cast<std::vector<Match>*>(ctx);
+    out->push_back({id, from, to, flags});
     return 0;
 }
 ```
